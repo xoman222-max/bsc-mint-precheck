@@ -216,12 +216,23 @@ def simulate_candidates(cands, rpc, addr, W, qty, price, limit=6):
             if not rr[0].get("error") and rr[1].get("result") and c["source"] != "abi" and v == 0 and len(ret) > 2:
                 c["sim"] = "eth_call 有回傳值，可能是 view 函式"; break
             if not rr[0].get("error") and rr[1].get("result"):
-                c["sim"] = f"eth_call+estimateGas 通過 (value={v/1e18} BNB)"; c["score"] += 3; c["why"].append("模擬通過"); break
+                c["sim"] = f"eth_call+estimateGas 通過 (value={v/1e18} BNB)"; c["pass_value"] = v; c["score"] += 3; c["why"].append("模擬通過"); break
             e = rr[0].get("error") or rr[1].get("error") or {}
             d = e.get("data") if isinstance(e.get("data"), str) else ""
             c["sim"] = "失敗 " + str(decode_revert(d) if d else e.get("message"))
     cands.sort(key=lambda c: (-c["score"], c["signature"]))
     return cands
+
+PRICE_ERR = re.compile(r"wrong (bnb )?amount|insufficient|incorrect (value|payment|price)|invalid (value|price|amount)|value", re.I)
+def price_override(sims, ec, price):
+    """If standard sims failed with a price error but a candidate passed read-only at a different value, describe it."""
+    if any(s.get("ok") for s in sims): return None
+    if not any(PRICE_ERR.search(str(s.get("revert") or "")) for s in sims): return None
+    ok = [c for c in ec if c.get("pass_value") is not None and c["pass_value"] != (price or 0)]
+    if not ok: return None
+    v = ok[0]["pass_value"]
+    head = "可能目前免費" if v == 0 else f"實際價格可能為 {v/1e18} BNB"
+    return f"{head}（{ok[0]['signature']} 以 {v/1e18} BNB 模擬通過，getter 價格 {(price or 0)/1e18} BNB 失敗），需官網確認"
 
 CANDIDATE_NOTE = "以下為「候選入口函式」，依提示排序，需人工/官網確認才是真正的 mint 入口；本工具不簽名、不送出。"
 
@@ -439,7 +450,7 @@ def precheck(addr, wallet=None, qty=1, url_info=None, T=None):
     except Exception as e:
         ec = []; rep["warnings"].append(f"entry candidates error: {e}")
     rep["entry_candidates"] = {"note": CANDIDATE_NOTE, "basis": "verified ABI" if rep["verified"] else "bytecode selectors + 4byte/openchain",
-                               "items": [{k: c.get(k) for k in ("signature", "payable", "score", "why", "sim", "source")} for c in ec[:10]]}
+                               "items": [{k: c.get(k) for k in ("signature", "payable", "score", "why", "sim", "pass_value", "source")} for c in ec[:10]]}
     T["simulate"] = round(time.time()-t, 3)
 
     # ---- risk ----
@@ -484,6 +495,7 @@ def precheck(addr, wallet=None, qty=1, url_info=None, T=None):
     if rep["risk"]["level"] == "高": concl = "高風險"
     elif ok: concl = "可以mint（模擬通過）"
     elif re.search(r"not the owner|onlyowner|ownableunauthorized|accesscontrol|onlyminter|minter role", rv) and not re.search(r"wrong|insufficient|sold", rv): concl = "無公開mint（僅owner/minter）"
+    elif price_override(sims, ec, price): concl = price_override(sims, ec, price)
     elif re.search(r"wrong (bnb )?amount|insufficient|incorrect (value|payment|price)|invalid (value|price|amount)|value", rv): concl = "價格不符（getter 讀到的價格與合約要求不同，需核對）"
     elif rem == 0 or re.search(r"sold ?out|exceed(s)? (max )?supply|max supply|soldout", rv): concl = "已售罄"
     elif flags.get("paused") is True or any(v is False for k, v in flags.items() if k != "paused") or (st and st > nowts) or re.search(r"not (started|active|open|live)|paused|notstarted|notactive|closed|not ?open", rv): concl = "未開放"

@@ -42,3 +42,5 @@ Admin/owner, ERC20/721 transfer/approve, set*/withdraw* etc. are excluded. Ranke
 buy/take/gift/get/purchase/join/participate, and a passing read-only eth_call+estimateGas (with --wallet if given).
 **These are candidates only — confirm on the official site / explorer before use.** In `--json`: `entry_candidates.items[]`
 (signature, payable, score, why, sim, source). Conclusion `標準 mint 名稱未命中，列出候選入口函式（需人工確認）` replaces the old 找不到 mint 函式.
+
+Price override: if the standard simulation fails with a price error (e.g. Wrong BNB amount) but a candidate passes read-only at another value, the conclusion becomes `可能目前免費…/實際價格可能為 X BNB…，需官網確認` instead of 價格不符 (`pass_value` in JSON).

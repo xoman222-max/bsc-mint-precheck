@@ -30,3 +30,11 @@ assert set(r.methods) <= {"eth_call", "eth_estimateGas"}, r.methods
 c2 = P.entry_candidates(None, {"0xaaaaaaaa": "takeGift(uint256)", "0xbbbbbbbb": "approve(address,uint256)"})
 assert [x["signature"] for x in c2] == ["takeGift(uint256)"], c2
 print("PASS custom-named entry candidates (takeGift/buy)")
+# price override: standard sim fails "Wrong BNB amount", candidate passes at 0 -> free hint
+sims = [{"method": "mint()", "ok": False, "revert": "Error: Wrong BNB amount"}]
+ec = [{"signature": "mint()", "pass_value": 0}]
+o = P.price_override(sims, ec, 10**15); assert o and o.startswith("可能目前免費"), o
+assert P.price_override(sims, [{"signature": "mint()", "pass_value": 10**15}], 10**15) is None
+o2 = P.price_override(sims, [{"signature": "buy()", "pass_value": 2*10**15}], 10**15); assert "0.002 BNB" in o2, o2
+assert P.price_override([{"ok": True}], ec, 10**15) is None
+print("PASS price override conclusion")
