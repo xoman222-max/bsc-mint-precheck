@@ -1,0 +1,3 @@
+requests>=2.28
+eth-utils>=2.0   # keccak; falls back to pycryptodome if absent
+pycryptodome>=3.15

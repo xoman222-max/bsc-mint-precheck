@@ -1,0 +1,7 @@
+data/*.db
+reports/
+ai_queue/
+.env
+*.key
+__pycache__/
+.venv/
