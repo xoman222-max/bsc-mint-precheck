@@ -34,3 +34,11 @@ bash <dir>/tests/run_tests.sh
 ## Report to the human
 Conclusion, price, remaining, eligibility, risk reasons, simulation result, and what they must confirm (official CA,
 price/qty, no approvals needed). Mark anything unverified. Never execute the mint.
+
+## 候選入口函式 (custom-named mint, e.g. takeGift / buy)
+Standard names (mint/publicMint/claim/safeMint…) are matched first. In addition — and especially when none match — the tool lists
+**entry candidates**: non-view functions from the verified ABI, or (unverified) bytecode selectors resolved via openchain → 4byte.
+Admin/owner, ERC20/721 transfer/approve, set*/withdraw* etc. are excluded. Ranked by: payable, qty/amount/proof args, names like
+buy/take/gift/get/purchase/join/participate, and a passing read-only eth_call+estimateGas (with --wallet if given).
+**These are candidates only — confirm on the official site / explorer before use.** In `--json`: `entry_candidates.items[]`
+(signature, payable, score, why, sim, source). Conclusion `標準 mint 名稱未命中，列出候選入口函式（需人工確認）` replaces the old 找不到 mint 函式.

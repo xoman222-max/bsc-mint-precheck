@@ -14,4 +14,5 @@ out=$($PY precheck.py 0x$(printf 'a%.0s' {1..64}) 2>&1); echo "$out" | grep -q "
 $PY -c "import precheck as P
 try: P.RPC().batch([('eth_sendRawTransaction',['0x'])]); print('FAIL guard')
 except PermissionError: print('PASS rpc send guard')" | tee /dev/stderr | grep -q PASS && pass=$((pass+1)) || fail=$((fail+1))
+$PY tests/test_custom_entry.py 2>&1 | tee /dev/stderr | grep -q PASS && pass=$((pass+1)) || fail=$((fail+1))
 echo "passed=$pass failed=$fail"; [ $fail -eq 0 ]

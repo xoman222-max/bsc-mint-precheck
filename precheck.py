@@ -85,6 +85,12 @@ def lookup_sigs(sels):
             for k, v in (r.get("result", {}).get("function") or {}).items():
                 _sigcache[k] = v[0]["name"] if v else None
         except Exception: pass
+    for x in [x for x in need if not _sigcache.get(x)][:40]:  # fallback: 4byte.directory
+        try:
+            r = requests.get("https://www.4byte.directory/api/v1/signatures/", params={"hex_signature": x}, timeout=8).json()
+            res = sorted(r.get("results") or [], key=lambda z: z.get("id", 0))
+            if res: _sigcache[x] = res[0]["text_signature"]
+        except Exception: pass
     return {x: _sigcache.get(x) for x in sels}
 
 def selectors_from_bytecode(code):
@@ -137,6 +143,87 @@ SLOT_1967_BEACON = "0xa3f0ad74e5423aebfd80d3ef4346578335a9a72aeaee59ff6cb3582b35
 SLOT_1967_ADMIN = "0xb53127684a568b3173ae13b9f8a6016e243e63b6e8ee1179d6a7ce1e8c03d0c1"
 SLOT_OZ_LEGACY = "0x7050c9e0f4ca769c69bd3a8ef740bc37934f8e2c036e5a723fd8ee048ed3f8c3"
 SLOT_1822 = "0xc5f16f0fcc639fa48a6947836d9850f504798523bf8c9a3a87d5876cf622bcf7"
+
+# ---------------- entry candidates (custom-named mint functions) ----------------
+EXCLUDE_NAMES = re.compile(r"^(transfer|transferFrom|safeTransferFrom|approve|setApprovalForAll|increaseAllowance|decreaseAllowance|"
+    r"renounceOwnership|transferOwnership|acceptOwnership|upgradeTo|upgradeToAndCall|initialize|multicall|permit|burn|burnFrom|"
+    r"pause|unpause|grantRole|revokeRole|renounceRole|rescue\w*|recover\w*|airdrop\w*|ownerMint|devMint|teamMint|reserve\w*|"
+    r"set\w*|withdraw\w*|update\w*|toggle\w*|enable\w*|disable\w*|flip\w*|admin\w*|owner\w*|emergency\w*|sweep\w*|"
+    r"batchTransfer\w*|safeBatchTransferFrom|cancel\w*|add\w*|remove\w*|change\w*|configure\w*|lock\w*|unlock\w*)$", re.I)
+HINT_NAMES = re.compile(r"(mint|claim|buy|take|gift|get|purchase|join|participate|enter|register|redeem|drop|open|public|free|sale)", re.I)
+
+def _parse_sig(sig):
+    m = re.match(r"^(\w+)\((.*)\)$", sig or ""); 
+    return (m.group(1), [x for x in m.group(2).split(",") if x]) if m else (None, None)
+
+def entry_candidates(abi=None, known=None, views=(), standard_hits=()):
+    """List possible user entry functions. abi (verified) wins; else known selector->signature map from bytecode lookup.
+    Returns ranked list of dicts. These are CANDIDATES ONLY - need human/site confirmation."""
+    fns = []
+    if abi:
+        for it in abi:
+            if it.get("type") != "function": continue
+            mut = it.get("stateMutability") or ("payable" if it.get("payable") else "view" if it.get("constant") else "nonpayable")
+            if mut in ("view", "pure"): continue
+            ins = it.get("inputs") or []
+            sig = f"{it['name']}({','.join(i['type'] for i in ins)})"
+            fns.append({"signature": sig, "name": it["name"], "types": [i["type"] for i in ins],
+                        "argnames": [i.get("name") or "" for i in ins], "payable": mut == "payable", "source": "abi"})
+    else:
+        for s, n in (known or {}).items():
+            nm, ty = _parse_sig(n)
+            if nm is None or n in views: continue
+            fns.append({"signature": n, "name": nm, "types": ty, "argnames": [], "payable": None, "source": "4byte/openchain"})
+    out = []
+    for f in fns:
+        nm = f["name"]
+        if EXCLUDE_NAMES.match(nm) or nm.startswith(("_", "is", "has")): continue
+        if f["source"] != "abi" and (nm in GETTERS or re.match(r"^(get[A-Z_]|tokenURI|supportsInterface|balanceOf|ownerOf|allowance)", nm)
+                or re.search(r"(ed|By|Of|Open|Active|Price|Count|Limit|Supply|Status|Time|URI|Root)$", nm)): continue  # likely view
+        if f["types"] and set(f["types"]) <= {"address"} and len(f["types"]) >= 2: continue  # transfer-like
+        score, why = 0, []
+        if f["payable"]: score += 3; why.append("payable")
+        if HINT_NAMES.search(nm): score += 2; why.append("名稱像入口")
+        an = " ".join(f["argnames"]).lower()
+        if re.search(r"qty|quantity|amount|count|num|_n\b|times", an) or (f["types"] in (["uint256"], ["uint8"], ["uint16"], ["uint32"]) ): score += 1; why.append("數量/金額參數")
+        if "bytes32[]" in f["types"] or "proof" in an: score += 1; why.append("merkle proof 參數")
+        if f["signature"] in standard_hits: score += 2; why.append("標準 mint 名稱")
+        out.append({**f, "score": score, "why": why})
+    out.sort(key=lambda c: (-c["score"], c["signature"]))
+    return out
+
+def simple_args(types, wallet, qty):
+    """Encode only trivially fillable args (uint=qty, address=wallet). None if not auto-fillable."""
+    enc = ""
+    for t in types:
+        if re.fullmatch(r"uint\d*", t): enc += w(qty)
+        elif t == "address": enc += w(wallet)
+        elif t == "bool": enc += w(1)
+        else: return None
+    return enc
+
+def simulate_candidates(cands, rpc, addr, W, qty, price, limit=6):
+    """read-only eth_call + eth_estimateGas only (RPC class still blocks send/sign)."""
+    for c in cands[:limit]:
+        args = simple_args(c["types"], W, qty)
+        if args is None: c["sim"] = "略過（參數無法自動填）"; continue
+        data = sel(c["signature"]) + args
+        vals = [0] + ([price * qty] if price and c["payable"] is not False else [])
+        for v in vals:
+            tx = {"from": W, "to": addr, "data": data, "value": hex(v)}
+            rr = rpc.batch([("eth_call", [tx, "latest"]), ("eth_estimateGas", [tx])])
+            ret = rr[0].get("result") or "0x"
+            if not rr[0].get("error") and rr[1].get("result") and c["source"] != "abi" and v == 0 and len(ret) > 2:
+                c["sim"] = "eth_call 有回傳值，可能是 view 函式"; break
+            if not rr[0].get("error") and rr[1].get("result"):
+                c["sim"] = f"eth_call+estimateGas 通過 (value={v/1e18} BNB)"; c["score"] += 3; c["why"].append("模擬通過"); break
+            e = rr[0].get("error") or rr[1].get("error") or {}
+            d = e.get("data") if isinstance(e.get("data"), str) else ""
+            c["sim"] = "失敗 " + str(decode_revert(d) if d else e.get("message"))
+    cands.sort(key=lambda c: (-c["score"], c["signature"]))
+    return cands
+
+CANDIDATE_NOTE = "以下為「候選入口函式」，依提示排序，需人工/官網確認才是真正的 mint 入口；本工具不簽名、不送出。"
 
 # ---------------- DB ----------------
 SCHEMA = """CREATE TABLE IF NOT EXISTS projects(id INTEGER PRIMARY KEY, address TEXT, url TEXT, name TEXT, impl TEXT,
@@ -345,7 +432,15 @@ def precheck(addr, wallet=None, qty=1, url_info=None, T=None):
         elif rr[1].get("error"): sim["gas_error"] = rr[1]["error"].get("message")
         sims.append(sim)
         if sim.get("ok") and "gas" in sim: break
-    rep["simulation"] = sims; T["simulate"] = round(time.time()-t, 3)
+    rep["simulation"] = sims
+    try:
+        ec = entry_candidates(ver.get("abi") if ver else None, known, views, set(c[0] for c in cands))
+        ec = simulate_candidates(ec, rpc, addr, W, qty, price) if ec else ec
+    except Exception as e:
+        ec = []; rep["warnings"].append(f"entry candidates error: {e}")
+    rep["entry_candidates"] = {"note": CANDIDATE_NOTE, "basis": "verified ABI" if rep["verified"] else "bytecode selectors + 4byte/openchain",
+                               "items": [{k: c.get(k) for k in ("signature", "payable", "score", "why", "sim", "source")} for c in ec[:10]]}
+    T["simulate"] = round(time.time()-t, 3)
 
     # ---- risk ----
     t = time.time(); reasons = []; score = 0
@@ -393,11 +488,13 @@ def precheck(addr, wallet=None, qty=1, url_info=None, T=None):
     elif rem == 0 or re.search(r"sold ?out|exceed(s)? (max )?supply|max supply|soldout", rv): concl = "已售罄"
     elif flags.get("paused") is True or any(v is False for k, v in flags.items() if k != "paused") or (st and st > nowts) or re.search(r"not (started|active|open|live)|paused|notstarted|notactive|closed|not ?open", rv): concl = "未開放"
     elif any("額度" in e or "已 mint" in e for e in elig) or rep["requirements"]["merkle"] or rep["requirements"]["signature"] or re.search(r"already|whitelist|allowlist|proof|not ?eligible|limit|max ?per|notagent|not agent|unauthori[sz]ed|signature|not ?allowed", rv): concl = "不符資格/需白名單或簽名"
-    elif not cands: concl = "找不到 mint 函式"
+    elif not cands and rep["entry_candidates"]["items"]: concl = "標準 mint 名稱未命中，列出候選入口函式（需人工確認）"
+    elif not cands: concl = "找不到 mint 函式（也無候選入口）"
     else: concl = "模擬失敗"
     rep["conclusion"] = concl
     rep["needs_ai_analysis"] = (not familiar) and (not cands or len(unknown) > 5)
     if rep["needs_ai_analysis"]:
+        os.makedirs(os.path.join(HERE, "ai_queue"), exist_ok=True)
         p = os.path.join(HERE, "ai_queue", f"{addr.lower()}.json")
         json.dump({"address": addr, "impl": impl, "unknown_selectors": unknown, "known": known, "getters": G,
                    "sim": sims, "hint": "陌生合約：請 AI 判讀未知 selector 與 mint 流程"}, open(p, "w"), indent=1, ensure_ascii=False)
@@ -434,6 +531,11 @@ def summary(rep, T, url_info=None):
         if "skipped" in s: L.append(f"模擬 {s['method']}：略過（{s['skipped']}）")
         else: L.append(f"模擬 {s['method']} value={s['value_bnb']} BNB：{'通過' if s['ok'] else '失敗 ' + str(s.get('revert'))}" + (f" gas≈{s['gas']}（≈{s['gas_cost_bnb']:.6f} BNB）" if s.get("gas") else ""))
     if not rep.get("simulation"): L.append("模擬：無可模擬的 mint 函式")
+    ec = (rep.get("entry_candidates") or {}).get("items") or []
+    if ec:
+        L.append("候選入口：" + CANDIDATE_NOTE)
+        for c in ec[:5]:
+            L.append(f"  - {c['signature']}{' [payable]' if c['payable'] else ''} 分數{c['score']}（{','.join(c['why']) or '無提示'}）" + (f" 模擬：{c['sim']}" if c.get("sim") else ""))
     hm = rep.get("history_match")
     L.append(f"歷史比對：{hm['name'] or hm['address']} 相似度 {hm['score']}（{','.join(hm['why'])}，當時結果 {hm['outcome']}）— 已沿用其識別方法，數值皆即時重查" if hm else "歷史比對：無相似專案")
     if rep.get("needs_ai_analysis"): L.append(f"⚠ 陌生合約，需 AI 判讀：{rep['ai_summary_file']}")
@@ -477,6 +579,7 @@ def main():
         rep["timings"] = Ti; rep["url_scan"] = url_info; rep["checked_at"] = now()
         if not a.no_save: save(rep, url_info and url_info["url"], Ti)
         else: rep.pop("_feat", None); rep.pop("_used_getters", None)
+        os.makedirs(os.path.join(HERE, "reports"), exist_ok=True)
         fn = os.path.join(HERE, "reports", f"{datetime.date.today()}-{addr.lower()}.json")
         json.dump(rep, open(fn, "w"), indent=1, ensure_ascii=False, default=str); rep["report_file"] = fn
         print(summary(rep, Ti, url_info)); print(f"完整報告：{fn}\n"); reps.append(rep)
